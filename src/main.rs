@@ -86,6 +86,18 @@ impl ApplicationHandler for App {
         
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        self.chip8.update(now.duration_since(self.last_frame.unwrap_or(now)));
+        self.last_frame = Some(now);
+        
+
+        if self.chip8.display_changed && let Some(window) = self.window {
+            //sleep(Duration::from_micros(100));
+            window.request_redraw();
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -94,10 +106,6 @@ impl ApplicationHandler for App {
     ) {
         match window_event {
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                self.chip8.update(now.duration_since(self.last_frame.unwrap_or(now)));
-                self.last_frame = Some(now);
-
                 if self.chip8.display_changed && let Some(pixels) = self.pixels.as_mut() {
                     let frame = pixels.frame_mut();
                     for (position, i) in self.chip8.framebuffer.iter().enumerate() {
@@ -117,15 +125,10 @@ impl ApplicationHandler for App {
 
                     self.chip8.display_changed = false;
                     pixels.render().expect("Unable to render pixels...");
-                    
                 }
-                
-                if let Some(window) = self.window {
-                    sleep(Duration::from_micros(100));
-                    window.request_redraw();
-                }
-                
             }
+
+
             WindowEvent::Resized(size) => {
                 if let Some(pixels) = self.pixels.as_mut() {
                     pixels.resize_surface(size.width, size.height).expect("Unable to resize the window");
@@ -216,16 +219,28 @@ impl Chip8 {
         self.cycle_accumulator += delta_time;
         self.delay_accumulator += delta_time;
 
-        if self.cycle_accumulator >= Duration::from_micros(1000000 / 700) {
-            self.cycle_accumulator = Duration::ZERO;
+        let cycles = (self.cycle_accumulator.as_micros() / (1000000 / 700)) as u16;
+        
+        for i in 0..cycles {
             self.cycle();
         }
 
-        if self.delay_accumulator >= Duration::from_micros(1000000 / 60) {
+        if cycles > 0 {
+            self.cycle_accumulator = Duration::ZERO;
+        }
+
+        let delays = (self.delay_accumulator.as_micros() / (1000000 / 60)) as u16;
+        //println!("Delay will be subtracted in {delays}");
+
+
+        if self.delay_timer as u16 > delays {
+            self.delay_timer -= delays as u8;
+        } else {
+            self.delay_timer = 0;
+        }
+        
+        if delays > 0 {
             self.delay_accumulator = Duration::ZERO;
-            if self.delay_timer > 0 {
-                self.delay_timer -= 1;
-            }
         }
     }
 
@@ -242,24 +257,26 @@ impl Chip8 {
         let x: u8 = (instruction >> 8 & 0x0F) as u8;
         let y: u8 = (instruction >> 4 & 0x00F) as u8;
 
-        println!("{instruction_type} (instruction) in {} ", self.pc);
-        io::stdout().flush().expect("Unable to flush the terminal");
+        //println!("{instruction_type} (instruction) in {} ", self.pc);
+        //io::stdout().flush().expect("Unable to flush the terminal");
 
         match instruction_type {
             0x0 => {
                 match instruction {
                     0x00EE => {
                         //Return from a subroutine
-                        println!("Returning from a subroutine");
+                        //println!("Returning from a subroutine");
                         self.sp -= 1;
                         self.pc = self.stack[self.sp as usize];
                         
                     }
                     0x00E0 => {
+                        //Clear screen
                         self.framebuffer = [false; DISPLAY_WIDTH * DISPLAY_HEIGHT];
+                        self.display_changed = true;
                     }
                     _ => {
-                        println!("Not implemented type 0 instruction ({instruction})");
+                        //println!("Not implemented type 0 instruction ({instruction})");
                         sleep(Duration::from_secs(1));
                     }
                 }
@@ -268,7 +285,7 @@ impl Chip8 {
             0x1 => {
                 //Jump to nnn
                 self.pc = nnn;
-                println!("Founded a jump to {nnn}");
+                //println!("Founded a jump to {nnn}");
             }
 
             0x2 => {
@@ -309,7 +326,7 @@ impl Chip8 {
                 // Add nn on Vx
                 //println!("Before crash: seting adding {nn} to register {x}, it already have the value: {}", self.registers[x as usize]);
                 self.registers[x as usize] = ((self.registers[x as usize] as u16 + nn as u16) % 256) as u8;
-                println!("Register V{x} incremented in {nn}, now it has {}", self.registers[x as usize])
+                //println!("Register V{x} incremented in {nn}, now it has {}", self.registers[x as usize])
                 
             }
 
@@ -346,13 +363,15 @@ impl Chip8 {
                             (value1, value2) = (value2, value1)
                         }
 
-                        let mut result: u8 = 1;
+                        let result: u8;
 
                         let mut vf: u8 = 1;
                         
                         if value2 > value1 {
                             vf = 0;
                             result = (256 - (value2 as u16 - value1 as u16)) as u8
+                        } else {
+                            result = value1 - value2;
                         }
 
                         //println!("The idea is Vx = Vx - Vy\n{} - {} (we will do {value1} - {value2})", self.registers[x as usize], self.registers[y as usize]);
@@ -366,7 +385,7 @@ impl Chip8 {
                         self.registers[x as usize] >>= 1;
                     }
                     0xE => {
-                        self.registers[0xF] = self.registers[x as usize] & 0x80;
+                        self.registers[0xF] = (self.registers[x as usize] & 0x80) >> 7;
                         self.registers[x as usize] &= 0x7F;
                         self.registers[x as usize] <<= 1;
                     }
@@ -385,7 +404,7 @@ impl Chip8 {
             0xB => {
                 //Jump to nnn + v0
                 self.pc = nnn + self.registers[0] as u16;
-                println!("Jumping to {}", self.pc);
+                //println!("Jumping to {}", self.pc);
             }
 
             0xD => {
@@ -421,18 +440,18 @@ impl Chip8 {
                 match nn {
                     0xA1 | 0x9E => {
                         //Jump if input Vx is clicked
-                        println!("Checking for {}", self.registers[x as usize]);
+                        //println!("Checking for {}", self.registers[x as usize]);
                         let mut value = self.input[self.registers[x as usize] as usize];
                         
                         value ^= nn == 0xA1;
                         if value {
                             self.pc += 2;
-                            println!("Jumped cause {} is clicked", self.registers[x as usize]);
+                            //println!("Jumped cause {} is clicked", self.registers[x as usize]);
                         }
                     }
 
                     _ => {
-                        println!("Not implemented Ex{nn}");
+                        //println!("Not implemented Ex{nn}");
                         sleep(Duration::from_secs(1));
                     }
                 }
@@ -497,7 +516,7 @@ impl Chip8 {
                     }
 
                     _ => {
-                        println!("Not implemented instruction Fx{nn}.");
+                        //println!("Not implemented instruction Fx{nn}.");
                         //sleep(Duration::from_secs(1));
                     }
                     
@@ -505,7 +524,7 @@ impl Chip8 {
             }
 
             _ => {
-                println!("Not implemented instruction {instruction}, of type {instruction_type}");
+                //println!("Not implemented instruction {instruction}, of type {instruction_type}");
             }
         }
     }
@@ -514,7 +533,7 @@ impl Chip8 {
 fn main() {
     let main_loop = EventLoop::new().unwrap();
     let mut app = App::default();
-    app.chip8.load_rom_file(String::from("C:\\Users\\Joel\\Downloads\\flightrunner.ch8"));//,"C:\\Users\\Joel\\Downloads\\5-quirks.ch8"));
+    app.chip8.load_rom_file(String::from("C:\\Users\\Joel\\Downloads\\4-flags.ch8"));//,"C:\\Users\\Joel\\Downloads\\5-quirks.ch8"));
     main_loop.set_control_flow(ControlFlow::Poll);
     main_loop.run_app(&mut app).expect("Something went wrong.");
 }
